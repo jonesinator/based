@@ -695,7 +695,7 @@ public:
     /// @returns An optional text block, returned when a data block has been completed.
     [[nodiscard]] constexpr std::optional<text_block> push(std::byte input) noexcept {
         *data_cursor++ = input;
-        if constexpr (E.needs_pad || NBlocks != 1) {
+        if constexpr (buffer_bytes > 1) {
             if (data_cursor == data.end()) {
                 data_cursor = data.begin();
                 return encode<E, std::array>(std::span<const std::byte, buffer_bytes>{data});
@@ -713,7 +713,7 @@ public:
     ///
     /// @note The encoder can be reused after this to encode another message.
     [[nodiscard]] constexpr std::optional<std::tuple<text_block, std::size_t>> flush() noexcept {
-        if constexpr (E.needs_pad || NBlocks != 1) {
+        if constexpr (buffer_bytes > 1) {
             if (data_cursor != data.begin()) {
                 std::span<const std::byte> data_span(data.begin(), data_cursor - data.begin());
                 text_block text;

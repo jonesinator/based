@@ -15,6 +15,8 @@ Single-header C++23 implementation of the base16, base32, base32hex, base64, and
 - Works with `-fno-rtti`.
 - Numerous `static_assert` checks to ensure validity and document correct usage. Aims to achieve 100% code coverage of the library at compile-time, but it's difficult to prove this with current tooling.
 
+The library is focused on clarity and correctness more than performance. The core library is around 500 lines of C++ code, with around 500 lines of tests and 500 lines of comments.
+
 ## Overview
 
 Two functionally identical versions of the library are provided:
