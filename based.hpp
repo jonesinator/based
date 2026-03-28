@@ -23,10 +23,12 @@
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <climits>
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <expected>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <utility>
 #include <tuple>
@@ -34,6 +36,11 @@
 
 
 namespace based {
+
+
+/// The number of bits per byte, as assumed by RFC 4648. This is intentionally not CHAR_BIT, since
+/// the RFC encodes octets and the code would not be correct on platforms where CHAR_BIT != 8.
+constexpr std::size_t bits_per_byte = 8;
 
 
 /// Rounds up a number to the nearest multiple of a different number.
@@ -58,7 +65,7 @@ namespace based {
 ///
 /// @returns The array that results from concatenating lhs and rhs.
 template <typename T, std::size_t NLhs, std::size_t NRhs>
-[[nodiscard]] consteval std::array<T, NLhs + NRhs> operator+(
+[[nodiscard]] consteval std::array<T, NLhs + NRhs> concat(
     const std::array<T, NLhs>& lhs,
     const std::array<T, NRhs>& rhs
 ) noexcept(std::is_nothrow_copy_constructible_v<T>) {
@@ -66,6 +73,28 @@ template <typename T, std::size_t NLhs, std::size_t NRhs>
     std::ranges::copy(lhs, result.begin());
     std::ranges::copy(rhs, result.begin() + NLhs);
     return result;
+}
+
+
+/// Concatenate more than two arrays.
+///
+/// @tparam T    The type of element that all arrays contain.
+/// @tparam N1   The size of the first array.
+/// @tparam N2   The size of the second array.
+/// @tparam Ns   The sizes of the remaining arrays.
+///
+/// @param first The first array to concatenate.
+/// @param second The second array to concatenate.
+/// @param rest  The remaining arrays to concatenate.
+///
+/// @returns The array that results from concatenating all arrays left to right.
+template <typename T, std::size_t N1, std::size_t N2, std::size_t... Ns>
+[[nodiscard]] consteval auto concat(
+    const std::array<T, N1>& first,
+    const std::array<T, N2>& second,
+    const std::array<T, Ns>&... rest
+) noexcept(std::is_nothrow_copy_constructible_v<T>) {
+    return concat(concat(first, second), rest...);
 }
 
 
@@ -78,7 +107,7 @@ requires (CBegin <= CEnd)
 constexpr std::array<char, CEnd - CBegin + 1> chars = []{
     std::array<char, CEnd - CBegin + 1> result;
     for (std::size_t i = 0; i < result.size(); ++i) {
-        result[i] = CBegin + i;
+        result[i] = static_cast<char>(CBegin + i);
     }
     return result;
 }();
@@ -90,7 +119,7 @@ constexpr std::array<char, CEnd - CBegin + 1> chars = []{
 /// @tparam N The number of symbols in the encoding.
 template <std::size_t N>
 concept valid_encoding_size =
-    (std::has_single_bit(N) && N > 1 && N < std::numeric_limits<char>::max());
+    (std::has_single_bit(N) && N > 1 && N <= 64);
 
 
 /// The number of bits each encoded character represents.
@@ -108,7 +137,7 @@ constexpr std::size_t bits_per_char = std::bit_width(NEncoding) - 1;
 ///
 /// @tparam NEncoding The number of symbols in the encoding.
 template <std::size_t NEncoding>
-constexpr std::size_t block_bytes = std::lcm(bits_per_char<NEncoding>, CHAR_BIT) / CHAR_BIT;
+constexpr std::size_t block_bytes = std::lcm(bits_per_char<NEncoding>, bits_per_byte) / bits_per_byte;
 
 
 /// The number of characters in an encoding block for a given encoding size.
@@ -118,7 +147,7 @@ constexpr std::size_t block_bytes = std::lcm(bits_per_char<NEncoding>, CHAR_BIT)
 /// @tparam NEncoding The number of symbols in the encoding.
 template <std::size_t NEncoding>
 constexpr std::size_t block_chars =
-    std::lcm(bits_per_char<NEncoding>, CHAR_BIT) / bits_per_char<NEncoding>;
+    std::lcm(bits_per_char<NEncoding>, bits_per_byte) / bits_per_char<NEncoding>;
 
 
 /// The size in characters of a num_bytes-length binary message encoded with a given encoding size.
@@ -128,22 +157,31 @@ constexpr std::size_t block_chars =
 /// @param num_bytes The number of bytes in the original message.
 ///
 /// @returns The number of characters in the encoded message.
+///
+/// @note Undefined for inputs where `bits_per_byte * num_bytes` overflows `std::size_t`.
 template <std::size_t NEncoding>
 [[nodiscard]] constexpr std::size_t encoded_size(std::size_t num_bytes) noexcept {
-    return round_up(CHAR_BIT * num_bytes / bits_per_char<NEncoding>, block_chars<NEncoding>);
+    return round_up(
+        (bits_per_byte * num_bytes + bits_per_char<NEncoding> - 1) / bits_per_char<NEncoding>,
+        block_chars<NEncoding>);
 }
 
 
-/// The size in bytes of an num_chars-length text message decoded from an encoding of a given size.
+/// The maximum size in bytes of an num_chars-length text message decoded from an encoding of a given
+/// size. The actual size may be less due to padding.
 ///
 /// @tparam NEncoding The number of symbols in the encoding.
 ///
 /// @param num_chars The number of characters in the encoded message.
 ///
-/// @returns The number of characters in the encoded message.
+/// @returns The maximum number of bytes in the decoded message.
+///
+/// @note Undefined for inputs where `bits_per_char<NEncoding> * num_chars` overflows `std::size_t`.
 template <std::size_t NEncoding>
 [[nodiscard]] constexpr std::size_t decoded_size(std::size_t num_chars) noexcept {
-    return round_up(bits_per_char<NEncoding> * num_chars / CHAR_BIT, block_bytes<NEncoding>);
+    return round_up(
+        (bits_per_char<NEncoding> * num_chars + bits_per_byte - 1) / bits_per_byte,
+        block_bytes<NEncoding>);
 }
 
 
@@ -157,7 +195,7 @@ concept needs_pad = block_bytes<NEncoding> != 1;
 /// The type of table to use to define an encoding, not including any pad character.
 ///
 /// It's an array where the index is the binary value to encode (between 0 and
-/// bits_per_char<NEncoding>], and the value at that index is the encoded symbol representing
+/// NEncoding), and the value at that index is the encoded symbol representing
 /// that value.
 ///
 /// For example, the following is the encode table for base64:
@@ -193,7 +231,7 @@ struct char_decode_result {
     char_decode_result_type type = char_decode_result_type::invalid;
 
     /// The value extracted in the decoding. This is only valid if `type` is `value`.
-    std::byte value = std::byte{0xfe};
+    std::byte value = std::byte{0x00};
 };
 
 
@@ -202,7 +240,7 @@ struct char_decode_result {
 /// It's an array that has an index for every possible byte. Each byte can map to one of the
 /// above `decode_result`s, i.e. a value, a pad character, or an invalid character.
 using char_decode_result_array =
-    std::array<char_decode_result, std::numeric_limits<std::uint8_t>::max()>;
+    std::array<char_decode_result, std::numeric_limits<std::uint8_t>::max() + 1>;
 
 
 /// Type returned in the event that a buffer does not have a valid size.
@@ -283,6 +321,18 @@ struct decode_error_pad {
 };
 
 
+/// Type returned in the event that a message has non-canonical padding, i.e. the trailing bits of the
+/// last data character before padding are non-zero.
+struct decode_error_non_canonical {
+    /// The index of the last data character whose trailing bits are non-zero.
+    std::size_t index;
+
+    /// Allow comparisons of these objects.
+    constexpr std::strong_ordering operator<=>(
+        const decode_error_non_canonical& other) const noexcept = default;
+};
+
+
 /// Type returned in the event that a message has invalid padding.
 struct decode_error_pad_length {
     /// The illegal padding length in characters in the encoded string.
@@ -300,6 +350,7 @@ using decode_error = std::variant<
     decode_error_buffer_size,
     decode_error_character,
     decode_error_pad,
+    decode_error_non_canonical,
     decode_error_pad_length
 >;
 
@@ -320,12 +371,12 @@ requires valid_encoding_size<NEncoding>
     encode_table_array<NEncoding> encode_table
 ) noexcept {
     char_decode_result_array decode_table;
-    for (std::uint8_t symbol_index = 0; symbol_index < encode_table.size(); ++symbol_index) {
+    for (std::size_t symbol_index = 0; symbol_index < encode_table.size(); ++symbol_index) {
         if (decode_table[encode_table[symbol_index]].type != char_decode_result_type::invalid) {
             std::abort(); // Duplicate character.
         }
         decode_table[encode_table[symbol_index]].type = char_decode_result_type::value;
-        decode_table[encode_table[symbol_index]].value = std::byte{symbol_index};
+        decode_table[encode_table[symbol_index]].value = static_cast<std::byte>(symbol_index);
     }
     return decode_table;
 }
@@ -374,19 +425,19 @@ struct encoding {
     static constexpr std::size_t size = NEncoding;
 
     /// The number of bytes required for one encoding block.
-    static constexpr std::size_t block_bytes = block_bytes<NEncoding>;
+    static constexpr std::size_t block_bytes = based::block_bytes<NEncoding>;
 
     /// The number of encoded characters required for one encoding block.
-    static constexpr std::size_t block_chars = block_chars<NEncoding>;
+    static constexpr std::size_t block_chars = based::block_chars<NEncoding>;
 
     /// The number of bits each encoded character represents.
-    static constexpr std::size_t bits_per_char = bits_per_char<NEncoding>;
+    static constexpr std::size_t bits_per_char = based::bits_per_char<NEncoding>;
 
     // A bitmask that is bits_per_char bits long starting in the least-significant position.
     static constexpr std::byte mask = std::byte{size - 1};
 
     /// Whether or not the encoding may require padding character(s) at the end.
-    static constexpr bool needs_pad = needs_pad<NEncoding>;
+    static constexpr bool needs_pad = based::needs_pad<NEncoding>;
 
     /// The size in characters of the result of encoding num_bytes bytes of data.
     static constexpr std::size_t encoded_chars(std::size_t num_bytes) noexcept {
@@ -403,14 +454,14 @@ struct encoding {
     using encode_table_type = encode_table_array<NEncoding>;
 
     /// Constructor for encodings that don't require padding.
-    constexpr encoding(encode_table_type table) noexcept requires (!needs_pad)
+    consteval encoding(encode_table_type table) noexcept requires (!needs_pad)
         : pad_char(std::monostate{}) {
         std::ranges::copy(table, encode_table);
         std::ranges::copy(make_decode_table(table), decode_table);
     }
 
     /// Constructor for encodings that do require padding.
-    constexpr encoding(encode_table_type table, char pad_char_value) noexcept requires (needs_pad)
+    consteval encoding(encode_table_type table, char pad_char_value) noexcept requires (needs_pad)
         : pad_char(pad_char_value) {
         std::ranges::copy(table, encode_table);
         std::ranges::copy(make_decode_table(table, pad_char), decode_table);
@@ -424,18 +475,18 @@ struct encoding {
     /// Table used for decoding. Using an encoded character as an index, the value is the decoded
     /// bits_per_char binary value. Must be raw array because std::array can't be used in non-type
     /// template parameters.
-    char_decode_result decode_table[std::numeric_limits<std::uint8_t>::max()];
+    char_decode_result decode_table[std::numeric_limits<std::uint8_t>::max() + 1];
 
     /// The padding character (if applicable to this encoding.)
     const std::conditional_t<needs_pad, char, std::monostate> pad_char;
 };
 
 // Negative compilation tests, to ensure that invalid encodings result in compilation errors.
-// constexpr encoding bad_size(chars<'0', '9'> + chars<'A', 'E'>);
-// constexpr encoding bad_repeat(chars<'0'> + chars<'0', '9'> + chars<'A', 'E'>);
-// constexpr encoding bad_pad_given(chars<'0', '9'> + chars<'A', 'F'>, '=');
-// constexpr encoding bad_pad_omitted(chars<'0', '9'> + chars<'A', 'V'>);
-// constexpr encoding bad_pad_repeat(chars<'='> + chars<'1', '9'> + chars<'A', 'V'>, '=');
+// constexpr encoding bad_size(concat(chars<'0', '9'>, chars<'A', 'E'>));
+// constexpr encoding bad_repeat(concat(chars<'0'>, chars<'0', '9'>, chars<'A', 'E'>));
+// constexpr encoding bad_pad_given(concat(chars<'0', '9'>, chars<'A', 'F'>), '=');
+// constexpr encoding bad_pad_omitted(concat(chars<'0', '9'>, chars<'A', 'V'>));
+// constexpr encoding bad_pad_repeat(concat(chars<'='>, chars<'1', '9'>, chars<'A', 'V'>), '=');
 
 
 /// The unsafe base encoding algorithm. This is the main encoding logic.
@@ -449,26 +500,26 @@ struct encoding {
 /// @pre The caller has validated that the destination is large enough to contain
 ///      `E.encoded_chars(source.size())` characters. This is _not_ checked here.
 /// @post The `destination` contains the encoded `source`.
-template <encoding E, std::size_t NSizeHint = 0>
+template <encoding E, std::size_t NSizeHint = std::dynamic_extent>
 constexpr void encode_unchecked(
-    const std::span<char> destination,
-    const std::span<const std::byte> source
+    std::span<char> destination,
+    std::span<const std::byte> source
 ) noexcept {
     // Determine the number of characters we need to encode.
-    std::size_t encoded_chars = NSizeHint;
-    if constexpr (NSizeHint == 0) {
-        encoded_chars = E.encoded_chars(source.size());
+    std::size_t num_chars = NSizeHint;
+    if constexpr (NSizeHint == std::dynamic_extent) {
+        num_chars = E.encoded_chars(source.size());
     }
 
     // Encode the data character by character by extracting bits from the source.
-    for (std::size_t i = 0; i < encoded_chars; ++i) {
+    for (std::size_t i = 0; i < num_chars; ++i) {
         // Calculate properties about the location of the bits to extract.
         const std::size_t bit_start    = i * E.bits_per_char;
         const std::size_t bit_end      = bit_start + E.bits_per_char - 1;
-        const std::size_t byte_start   = bit_start / CHAR_BIT;
-        const std::size_t byte_end     = bit_end / CHAR_BIT;
-        const std::size_t offset_start = bit_start % CHAR_BIT;
-        const std::size_t offset_end   = bit_end % CHAR_BIT;
+        const std::size_t byte_start   = bit_start / bits_per_byte;
+        const std::size_t byte_end     = bit_end / bits_per_byte;
+        const std::size_t offset_start = bit_start % bits_per_byte;
+        const std::size_t offset_end   = bit_end % bits_per_byte;
 
         // Encode a single character. If the encoding requires no padding, which is known at
         // compile-time, then the data to extract is always within a single byte, and we don't need
@@ -479,18 +530,18 @@ constexpr void encode_unchecked(
         // bytes. The first (or only) byte is guaranteed to exist, but the second byte may not. If
         // the second byte does not exist, then zero should be used in its place.
         if constexpr (!E.needs_pad) {
-            const std::size_t shift = CHAR_BIT - E.bits_per_char - offset_start;
+            const std::size_t shift = bits_per_byte - E.bits_per_char - offset_start;
             const std::byte value = (source[byte_start] & (E.mask << shift)) >> shift;
             destination[i] = E.encode_table[std::to_underlying(value)];
         } else if (byte_start >= source.size()) {
             destination[i] = E.pad_char;
         } else if (byte_start == byte_end) {
-            const std::size_t shift = CHAR_BIT - E.bits_per_char - offset_start;
+            const std::size_t shift = bits_per_byte - E.bits_per_char - offset_start;
             const std::byte value = (source[byte_start] & (E.mask << shift)) >> shift;
             destination[i] = E.encode_table[std::to_underlying(value)];
         } else {
-            const std::size_t upper_shift = E.bits_per_char - (CHAR_BIT - offset_start);
-            const std::size_t lower_shift = CHAR_BIT - offset_end - 1;
+            const std::size_t upper_shift = E.bits_per_char - (bits_per_byte - offset_start);
+            const std::size_t lower_shift = bits_per_byte - offset_end - 1;
             const std::byte upper = (source[byte_start] & (E.mask >> upper_shift)) << upper_shift;
             const std::byte lower = byte_end >= source.size() ?
                 std::byte{0} : (source[byte_end] & (E.mask << lower_shift)) >> lower_shift;
@@ -512,8 +563,8 @@ constexpr void encode_unchecked(
 template <encoding E, std::size_t NBytes, std::size_t NChars>
 requires (NBytes != std::dynamic_extent && NChars >= E.encoded_chars(NBytes))
 constexpr void encode(
-    const std::span<char, NChars> destination,
-    const std::span<const std::byte, NBytes> source
+    std::span<char, NChars> destination,
+    std::span<const std::byte, NBytes> source
 ) noexcept {
     encode_unchecked<E, E.encoded_chars(NBytes)>(destination, source);
 }
@@ -536,7 +587,7 @@ constexpr void encode(
 template <encoding E, template <typename, std::size_t> class TContainer, std::size_t NBytes>
 requires (NBytes != std::dynamic_extent)
 [[nodiscard]] constexpr TContainer<char, E.encoded_chars(NBytes)> encode(
-    const std::span<const std::byte, NBytes> source
+    std::span<const std::byte, NBytes> source
 ) noexcept(std::is_nothrow_constructible_v<TContainer<char, E.encoded_chars(NBytes)>>) {
     TContainer<char, E.encoded_chars(NBytes)> encoded;
     encode_unchecked<E, E.encoded_chars(NBytes)>(std::span<char>{encoded}, source);
@@ -558,8 +609,8 @@ requires (NBytes != std::dynamic_extent)
 ///       If the function returns false, the `destination` buffer is untouched.
 template <encoding E>
 [[nodiscard]] constexpr std::expected<void, encode_error_buffer_size> encode(
-    const std::span<char> destination,
-    const std::span<const std::byte> source
+    std::span<char> destination,
+    std::span<const std::byte> source
 ) noexcept {
     if (destination.size() < E.encoded_chars(source.size())) {
         return std::unexpected(
@@ -583,7 +634,7 @@ template <encoding E>
 /// @note `TContainer` can be `std::basic_string`, `std::vector`, and similar containers.
 template <encoding E, template <typename> class TContainer>
 [[nodiscard]] constexpr TContainer<char> encode(
-    const std::span<const std::byte> source
+    std::span<const std::byte> source
 ) noexcept(std::is_nothrow_constructible_v<TContainer<char>, std::size_t, char>) {
     TContainer<char> encoded(E.encoded_chars(source.size()), '\0');
     encode_unchecked<E>(std::span<char>{encoded}, source);
@@ -591,7 +642,7 @@ template <encoding E, template <typename> class TContainer>
 }
 
 
-/// A class that assits in encoding binary data to text byte-by-byte, without needing to keep the
+/// A class that assists in encoding binary data to text byte-by-byte, without needing to keep the
 /// entire message or encoded text in memory all at once. A buffer of some number of encoding blocks
 /// is kept. Once the buffer fills up, an equivalent block of encoded text is returned.
 ///
@@ -612,32 +663,21 @@ public:
     /// The result type returned when a block of data is completed.
     using text_block = std::array<char, encoded_chars>;
 
-    /// Initializes the encoder, ready to accept data.
-    constexpr encoder() noexcept
-        : data_cursor(data.begin()) {
-    }
-
-    /// Copying an encoder simply copies the full state and recreates the iterator.
-    constexpr encoder(const encoder& other) noexcept
-        : data(other.data),
-          data_cursor(data.begin() + (other.data_cursor - other.data.begin())) {
-    }
-
     /// Adds a new byte of data to the encoder.
     ///
     /// @param input The byte of data to add to the encoder.
     ///
     /// @returns An optional text block, returned when a data block has been completed.
     [[nodiscard]] constexpr std::optional<text_block> push(std::byte input) noexcept {
-        *data_cursor++ = input;
+        data[data_index++] = input;
         if constexpr (buffer_bytes > 1) {
-            if (data_cursor == data.end()) {
-                data_cursor = data.begin();
+            if (data_index == buffer_bytes) {
+                data_index = 0;
                 return encode<E, std::array>(std::span<const std::byte, buffer_bytes>{data});
             }
             return std::nullopt;
         } else {
-            data_cursor = data.begin();
+            data_index = 0;
             return encode<E, std::array>(std::span<const std::byte, buffer_bytes>{data});
         }
     }
@@ -649,9 +689,10 @@ public:
     /// @note The encoder can be reused after this to encode another message.
     [[nodiscard]] constexpr std::optional<std::tuple<text_block, std::size_t>> flush() noexcept {
         if constexpr (buffer_bytes > 1) {
-            if (data_cursor != data.begin()) {
-                std::span<const std::byte> data_span(data.begin(), data_cursor - data.begin());
-                text_block text;
+            if (data_index != 0) {
+                std::span<const std::byte> data_span(data.begin(), data_index);
+                data_index = 0;
+                text_block text{};
                 encode_unchecked<E>(std::span<char>{text}, data_span);
                 return std::make_tuple(text, E.encoded_chars(data_span.size()));
             }
@@ -666,8 +707,8 @@ private:
     /// The buffered data.
     data_buffer data{};
 
-    /// The location within the data buffer where new data should be added.
-    data_buffer::iterator data_cursor;
+    /// The position within the data buffer where new data should be added.
+    std::size_t data_index = 0;
 };
 
 
@@ -681,23 +722,18 @@ private:
 /// @returns An expected decode_success representing the result of the decoding operation, with
 ///          a decode_error being returned in the error case.
 ///
-/// @pre The source buffer is known to be a multple of the encoding's block characters size.
+/// @pre The source buffer is known to be a multiple of the encoding's block characters size.
 /// @pre The destination buffer is known to be at least large enough to contain the decoded source.
+/// @pre The source size is a multiple of `E.block_chars`.
 /// @pre The destination buffer contains all zeroes data. If the destination buffer does not contain
 ///      zeroes, then the result will actually be the bitwise-or with the data that's already there.
 ///
 /// @post The `destination` contains the decoded `source`.
-template <encoding E, std::size_t NSizeHint = 0>
+template <encoding E>
 [[nodiscard]] constexpr std::expected<decode_success, decode_error> decode_unchecked(
-    const std::span<std::byte> destination,
-    const std::span<const char> source
+    std::span<std::byte> destination,
+    std::span<const char> source
 ) noexcept {
-    // Determine the number of characters we need to decode.
-    std::size_t decoded_bytes = NSizeHint;
-    if constexpr (NSizeHint == 0) {
-        decoded_bytes = E.decoded_bytes(source.size());
-    }
-
     // Decode the data character by character.
     std::size_t pad_count = 0;
     for (std::size_t i = 0; i < source.size(); ++i) {
@@ -714,24 +750,24 @@ template <encoding E, std::size_t NSizeHint = 0>
             // Calculate properties about the location where the decoded bits will be placed.
             const std::size_t bit_start    = i * E.bits_per_char;
             const std::size_t bit_end      = bit_start + E.bits_per_char - 1;
-            const std::size_t byte_start   = bit_start / CHAR_BIT;
-            const std::size_t byte_end     = bit_end / CHAR_BIT;
-            const std::size_t offset_start = bit_start % CHAR_BIT;
-            const std::size_t offset_end   = bit_end % CHAR_BIT;
+            const std::size_t byte_start   = bit_start / bits_per_byte;
+            const std::size_t byte_end     = bit_end / bits_per_byte;
+            const std::size_t offset_start = bit_start % bits_per_byte;
+            const std::size_t offset_end   = bit_end % bits_per_byte;
 
             // If the encoding doesn't use padding then we know that the decoded character's value
             // fits in exactly one byte. If it doesn't, then we need to check if the decoded bits
             // fit in exactly one byte or are split across two bytes.
             if constexpr (!E.needs_pad) {
                 destination[byte_start] |=
-                    result.value << (CHAR_BIT - (E.bits_per_char + offset_start));
+                    result.value << (bits_per_byte - (E.bits_per_char + offset_start));
             } else if (byte_start == byte_end) {
                 destination[byte_start] |=
-                    result.value << (CHAR_BIT - (E.bits_per_char + offset_start));
+                    result.value << (bits_per_byte - (E.bits_per_char + offset_start));
             } else {
                 destination[byte_start] |=
-                    result.value >> (E.bits_per_char - (CHAR_BIT - offset_start));
-                destination[byte_end] |= result.value << (CHAR_BIT - offset_end - 1);
+                    result.value >> (E.bits_per_char - (bits_per_byte - offset_start));
+                destination[byte_end] |= result.value << (bits_per_byte - offset_end - 1);
             }
         }
     }
@@ -740,18 +776,33 @@ template <encoding E, std::size_t NSizeHint = 0>
         if (pad_count) {
             if (pad_count >= E.block_chars) {
                 return std::unexpected(decode_error_pad_length{ pad_count });
-	    }
+            }
 
-            // If adding another character to the pad doesn't cross a byte boundary, it's an invalid
-            // padding length.
+            // A valid pad count must represent a whole number of unused bytes. We check this by
+            // seeing whether one more pad character would cross into a new byte — if it doesn't,
+            // the current count falls mid-byte and is invalid. We also reject counts that would
+            // land exactly on a block boundary, since that implies an entire block of padding.
             const std::size_t pad_bits  = E.bits_per_char * pad_count;
-            const std::size_t pad_byte  = pad_bits / CHAR_BIT;
-            const std::size_t next_byte = (pad_bits + E.bits_per_char) / CHAR_BIT;
+            const std::size_t pad_byte  = pad_bits / bits_per_byte;
+            const std::size_t next_byte = (pad_bits + E.bits_per_char) / bits_per_byte;
             if (next_byte == pad_byte || next_byte % E.block_bytes == 0) {
                 return std::unexpected(decode_error_pad_length{ pad_count });
-            } else {
-                return decode_success { (E.bits_per_char * pad_count + CHAR_BIT - 1) / CHAR_BIT };
             }
+
+            // Check for non-canonical encoding: the trailing bits of the last data character
+            // that fall beyond the actual data boundary should be zero. Since the destination
+            // was pre-zeroed, any non-zero byte beyond the useful data indicates non-canonical
+            // trailing bits.
+            const std::size_t data_chars = source.size() - pad_count;
+            const std::size_t extra_bits = (data_chars * E.bits_per_char) % bits_per_byte;
+            if (extra_bits > 0) {
+                const std::size_t useful_bytes = data_chars * E.bits_per_char / bits_per_byte;
+                if (destination[useful_bytes] != std::byte{0}) {
+                    return std::unexpected(decode_error_non_canonical{ data_chars - 1 });
+                }
+            }
+
+            return decode_success { (E.bits_per_char * pad_count + bits_per_byte - 1) / bits_per_byte };
         } else {
             return decode_success { 0 };
         }
@@ -777,9 +828,10 @@ requires (
     NBytes >= E.decoded_bytes(NChars)
 )
 [[nodiscard]] constexpr std::expected<decode_success, decode_error> decode(
-    const std::span<std::byte, NBytes> destination,
-    const std::span<const char, NChars> source
+    std::span<std::byte, NBytes> destination,
+    std::span<const char, NChars> source
 ) noexcept {
+    std::ranges::fill(destination, std::byte{0});
     return decode_unchecked<E>(destination, source);
 }
 
@@ -806,18 +858,15 @@ std::expected<
     decode_error
 >
 decode(
-    const std::span<const char, NChars> source
+    std::span<const char, NChars> source
 ) noexcept(std::is_nothrow_constructible_v<TContainer<std::byte, E.decoded_bytes(NChars)>>) {
     using return_type = std::expected<
         std::tuple<TContainer<std::byte, E.decoded_bytes(NChars)>, decode_success>, decode_error>;
     TContainer<std::byte, E.decoded_bytes(NChars)> decoded;
     std::ranges::fill(decoded, std::byte{0});
     return decode_unchecked<E>(std::span<std::byte>{decoded}, source)
-        .and_then([&decoded](decode_success success) { 
-            return return_type{std::make_tuple(decoded, success)};
-        })
-        .or_else([](decode_error error) {
-            return return_type{std::unexpected(error)};
+        .and_then([&decoded](decode_success success) {
+            return return_type{std::make_tuple(std::move(decoded), success)};
         });
 }
 
@@ -826,18 +875,17 @@ decode(
 ///
 /// @tparam E The encoding to use.
 ///
-/// @param destination The memory to which the encoded string should be written.
-/// @param source      The memory to encode.
+/// @param destination The memory to which the decoded data should be written.
+/// @param source      The text to decode.
 ///
-/// @returns True if the encoding succeeded, false otherwise. The only reason for failure
-///          is if the destination buffer is too small.
+/// @returns A decode_success on success, or a decode_error on failure.
 ///
-/// @post If the function returns true, the `destination` contains the encoded `source`.
-///       If the function returns false, the `destination` buffer is untouched.
+/// @post If the function succeeds, the `destination` contains the decoded `source`.
+///       If the function fails, the `destination` buffer may have been modified.
 template <encoding E>
 [[nodiscard]] constexpr std::expected<decode_success, decode_error> decode(
-    const std::span<std::byte> destination,
-    const std::span<const char> source
+    std::span<std::byte> destination,
+    std::span<const char> source
 ) noexcept {
     if (source.size() % E.block_chars != 0) {
         return std::unexpected(decode_error_message_size{ source.size(), E.block_chars });
@@ -848,16 +896,17 @@ template <encoding E>
             decode_error_buffer_size{ destination.size(), E.decoded_bytes(source.size()) });
     }
 
+    std::ranges::fill(destination, std::byte{0});
     return decode_unchecked<E>(destination, source);
 }
 
 
-/// Convert binary data to a text encoding. Dynamically-sized, heap-memory overload.
+/// Convert text-encoded data back into binary. Dynamically-sized, heap-memory overload.
 ///
 /// @tparam E          The encoding to use.
 /// @tparam TContainer The type of container to return.
 ///
-/// @param source The memory to encode.
+/// @param source The text to decode.
 ///
 /// @throws May throw if the container's constructor throws, or resizing the container throws, which
 ///         it likely does since both may typically require heap-memory allocations.
@@ -865,15 +914,16 @@ template <encoding E>
 /// @note `TContainer` can be `std::vector` and similar containers.
 template <encoding E, template <typename> class TContainer>
 [[nodiscard]] constexpr std::expected<TContainer<std::byte>, decode_error> decode(
-    const std::span<const char> source
+    std::span<const char> source
 ) noexcept(
-    std::is_nothrow_constructible_v<TContainer<char>, std::size_t, char> &&
+    std::is_nothrow_constructible_v<TContainer<std::byte>, std::size_t, std::byte> &&
     // This monstrosity essentially asks the question "does container.resize(std::size_t) throw?"
     // The cast is required since the "resize" function might be overloaded, and we need to ensure
     // the overload is selected. Even though "std::size_t" is specified as the argument, it needs to
     // be disambiguated ahead of time.
     std::is_nothrow_invocable_v<
-        decltype(static_cast<void(TContainer<char>::*)(std::size_t)>(&TContainer<char>::resize)),
+        decltype(static_cast<void(TContainer<std::byte>::*)(std::size_t)>(&TContainer<std::byte>::resize)),
+        TContainer<std::byte>&,
         std::size_t
     >
 ) {
@@ -889,15 +939,12 @@ template <encoding E, template <typename> class TContainer>
                     decoded.resize(decoded.size() - success.pad_bytes);
                 }
             }
-            return std::expected<TContainer<std::byte>, decode_error>(decoded);
-        })
-        .or_else([](decode_error error) {
-            return std::expected<TContainer<std::byte>, decode_error>(std::unexpected(error));
+            return std::expected<TContainer<std::byte>, decode_error>(std::move(decoded));
         });
 }
 
 
-/// A class that assits in decoding text back into binary, without needing to keep the entire
+/// A class that assists in decoding text back into binary, without needing to keep the entire
 /// message or encoded text in memory all at once. A buffer of some number of encoding blocks is
 /// kept. Once the buffer fills up, an equivalent block of decoded data is returned.
 ///
@@ -905,7 +952,7 @@ template <encoding E, template <typename> class TContainer>
 /// good, but that is omitted for now.
 ///
 /// @tparam E       The encoding to use.
-/// @tparam NBlocks The number of blocks of data to keep before encoding.
+/// @tparam NBlocks The number of blocks of data to keep before decoding.
 template <encoding E, std::size_t NBlocks = 1>
 class decoder {
 public:
@@ -921,26 +968,15 @@ public:
     /// The result type returned when a block of data is completed.
     using result_type = std::expected<std::tuple<data_block, decode_success>, decode_error>;
 
-    /// Initializes the encoder, ready to accept data.
-    constexpr decoder() noexcept
-        : text_cursor(text.begin()) {
-    }
-
-    /// Copying a decoder simply copies the full state and recreates the iterator.
-    constexpr decoder(const decoder& other) noexcept
-        : text(other.text),
-          text_cursor(text.begin() + (other.text_cursor - other.text.begin())) {
-    }
-
-    /// Adds a new byte of data to the encoder.
+    /// Adds a new character of text to the decoder.
     ///
-    /// @param input The byte of data to add to the encoder.
+    /// @param input The character to add to the decoder.
     ///
-    /// @returns An optional text block, returned when a data block has been completed.
+    /// @returns An optional result, returned when a text block has been completed.
     [[nodiscard]] constexpr std::optional<result_type> push(char input) noexcept {
-        *text_cursor++ = input;
-        if (text_cursor == text.end()) {
-            text_cursor = text.begin();
+        text[text_index++] = input;
+        if (text_index == buffer_chars) {
+            text_index = 0;
             return decode<E, std::array>(std::span<const char, buffer_chars>{text});
         }
         return std::nullopt;
@@ -952,16 +988,25 @@ public:
     ///
     /// @note The decoder can be reused after this to decode another message.
     [[nodiscard]] constexpr std::optional<result_type> flush() noexcept {
-        if (text_cursor != text.begin()) {
-            const std::size_t encoded_size = text_cursor - text.begin();
+        if (text_index != 0) {
+            const std::size_t encoded_size = text_index;
+            text_index = 0;
+
+            if (encoded_size % E.block_chars != 0) {
+                return result_type{std::unexpected(
+                    decode_error{decode_error_message_size{ encoded_size, E.block_chars }})};
+            }
+
             const std::span<const char> text_span(text.begin(), encoded_size);
 
             data_block data;
             data.fill(std::byte{0});
-            const std::expected<decode_success, decode_error> result = 
+            const std::expected<decode_success, decode_error> result =
                 decode_unchecked<E>(std::span<std::byte>{data}, text_span);
 
             if (result.has_value()) {
+                // The data buffer is larger than what was actually decoded, so the unused
+                // trailing bytes count as additional padding beyond what the encoding reported.
                 return std::make_tuple(data, decode_success{
                     result.value().pad_bytes + data_bytes - E.decoded_bytes(encoded_size)
                 });
@@ -979,20 +1024,20 @@ private:
     /// The buffered text.
     text_buffer text{};
 
-    /// The location within the text buffer where new text should be added.
-    text_buffer::iterator text_cursor;
+    /// The position within the text buffer where new text should be added.
+    std::size_t text_index = 0;
 };
 
 
 // Define all of the encodings from RFC 4648.
 // These can be used as a guide for defining your own encoding if needed.
 constexpr encoding base64(
-    chars<'A', 'Z'> + chars<'a', 'z'> + chars<'0', '9'> + chars<'+'> + chars<'/'>, '=');
+    concat(chars<'A', 'Z'>, chars<'a', 'z'>, chars<'0', '9'>, chars<'+'>, chars<'/'>), '=');
 constexpr encoding base64url(
-    chars<'A', 'Z'> + chars<'a', 'z'> + chars<'0', '9'> + chars<'-'> + chars<'_'>, '=');
-constexpr encoding base32(chars<'A', 'Z'> + chars<'2', '7'>, '=');
-constexpr encoding base32hex(chars<'0', '9'> + chars<'A', 'V'>, '=');
-constexpr encoding base16(chars<'0', '9'> + chars<'A', 'F'>);
+    concat(chars<'A', 'Z'>, chars<'a', 'z'>, chars<'0', '9'>, chars<'-'>, chars<'_'>), '=');
+constexpr encoding base32(concat(chars<'A', 'Z'>, chars<'2', '7'>), '=');
+constexpr encoding base32hex(concat(chars<'0', '9'>, chars<'A', 'V'>), '=');
+constexpr encoding base16(concat(chars<'0', '9'>, chars<'A', 'F'>));
 
 
 } // End namespace based.

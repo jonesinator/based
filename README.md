@@ -28,7 +28,7 @@ This is because the `static_assert` tests add quite a bit of time to the compila
 
 An example `based.cpp` file is provided, with an example `Makefile` that can build a small demonstration with either version of the library using `g++`. Use `make` to make and execute the version with `static_assert` tests. Use `make notest` compile and run the version without `static_assert` tests. An `a.out` file is created by the build process, and `make clean` will clean it up.
 
-To use the library, simply copy one of the libarary versions into your codebase and `#include` it.
+To use the library, simply copy one of the library versions into your codebase and `#include` it.
 
 ## Usage
 
@@ -47,7 +47,7 @@ The following encodings are defined by the library:
 If the named mappings from RFC 4648 are insufficient for your needs, you can create a custom mapping as long as it is a power of two in size. For example, to specify base16, but lower-case:
 
 ```cpp
-constexpr based::encoding base16lower(based::chars<'0', '9'> + based::chars<'a', 'f'>);
+constexpr based::encoding base16lower(based::concat(based::chars<'0', '9'>, based::chars<'a', 'f'>));
 ```
 
 This custom encoding can be used in place of the encodings defined by the library in all places.
@@ -76,7 +76,7 @@ If the buffer sizes are dynamic, a different version can be used to encode from 
 ```cpp
 std::span<const std::byte> data;
 std::span<char> text;
-std::expected<void, encode_error_buffer_size> text = based::encode<based::base64>(text, data);
+std::expected<void, encode_error_buffer_size> result = based::encode<based::base64>(text, data);
 ```
 
 The `encode_error_buffer_size` has two members, `buffer_size` is the actual buffer size of data passed to `encode`, and `expected_size` is the minimum size the buffer needed to be to encode the given number of bytes. This type is returned only if the given destination buffer is too small to contain the encoded text.
@@ -91,10 +91,10 @@ std::string text = based::encode<based::base64, std::basic_string>(data);
 If you'd rather use a byte-oriented interface, an `encoder` class exists to help with it:
 
 ```cpp
-using text_block = based::encoder<based:base64>::text_block;
+using text_block = based::encoder<based::base64>::text_block;
 std::optional<text_block> result;
 
-based::encoder<based:base64> encoder;
+based::encoder<based::base64> encoder;
 result = encoder.push(std::byte{0x01});
 result = encoder.push(std::byte{0x02});
 result = encoder.push(std::byte{0x03});
@@ -102,7 +102,7 @@ result = encoder.push(std::byte{0x04});
 result = encoder.flush();
 ```
 
-Use `push` to add data a byte at a time, and `flush` when done adding data. Both functions return an optional array ofdata that was encoded by the most recent byte pushed. By default the `encoder` buffers one block (as defined by the RFC) of text, but a second template parameter to the class allows a larger buffer size as a multiple of blocks. This will change the size of the array returned by the function.
+Use `push` to add data a byte at a time, and `flush` when done adding data. Both functions return an optional array of data that was encoded by the most recent byte pushed. By default the `encoder` buffers one block (as defined by the RFC) of text, but a second template parameter to the class allows a larger buffer size as a multiple of blocks. This will change the size of the array returned by the function.
 
 There exists an `encode_unchecked` function, which is used internally to be a fast implementation that performs potentially unsafe operations if certain bounds aren't checked or certain conditions are not ensured.
 
@@ -113,9 +113,10 @@ The decoding process takes a buffer of encoded text and converts it to a buffer 
 Several types of error can occur when decoding. Each type of error has its own type, and a `std::variant` of all of these types is created and returned in a `std::expected` whenever an error occurs.
 
 - `based::decode_error_message_size` - The message to decode is not a multiple of the block character count. Contains `message_size` which is the size of the message given to `decode`, and `block_chars` which is the expected multiple.
-- `based::decode_error_buffer_size` - The destination buffer given to `decode` was too small to contain the encoded text. Contains `buffer_size` which is the actual buffer size given to `decode`, and `expected_size` which is the _minimum_ size that would've worked.
+- `based::decode_error_buffer_size` - The destination buffer given to `decode` was too small to contain the decoded data. Contains `buffer_size` which is the actual buffer size given to `decode`, and `expected_size` which is the _minimum_ size that would've worked.
 - `based::decode_error_character` - A character that is not valid for the encoding was found in the encoded message. The `character` gives which character it was, and the `index` gives the location within the buffer where it was found.
 - `based::decode_error_pad` - A non-pad character was found after a pad character, which is not legal. The `index` member gives the location of the encoding character found after the pad character.
+- `based::decode_error_non_canonical` - The trailing bits of the last data character before padding are non-zero, which is a non-canonical encoding. The `index` member gives the position of the offending character.
 - `based::decode_error_pad_length` - A nonsensical pad length was found in the encoded message. The `length` member gives the invalid length found.
 
 If an error is encountered, `std::visit` with `if constexpr` can be used to get the details of the error.
@@ -123,8 +124,8 @@ If an error is encountered, `std::visit` with `if constexpr` can be used to get 
 If the buffer sizes are known at compile-time, a fixed-sized version can be used to decode from an unowned buffer to an unowned buffer:
 
 ```cpp
-std::span<const std::byte, 3> data;
-std::span<char, 4> text;
+std::span<std::byte, 3> data;
+std::span<const char, 4> text;
 std::expected<based::decode_success, based::decode_error> result =
     based::decode<based::base64>(data, text);
 ```
@@ -132,16 +133,16 @@ std::expected<based::decode_success, based::decode_error> result =
 If the buffer sizes are known at compile-time, a fixed-sized version can be used to decode from an unowned buffer to a sized container:
 
 ```cpp
-std::span<const std::byte, 3> data;
-std::expected<std::tuple<std::array<char, 4>, based::decode_success>, based::decode_error> result =
-    based::decode<based::base64, std::array>(data);
+std::span<const char, 4> text;
+std::expected<std::tuple<std::array<std::byte, 3>, based::decode_success>, based::decode_error> result =
+    based::decode<based::base64, std::array>(text);
 ```
 
 If the buffer sizes are dynamic, a different version can be used to decode from an unowned buffer to an unowned buffer:
 
 ```cpp
-std::span<const std::byte> data;
-std::span<char> text;
+std::span<std::byte> data;
+std::span<const char> text;
 std::expected<based::decode_success, based::decode_error> result =
     based::decode<based::base64>(data, text);
 ```
@@ -157,18 +158,18 @@ std::expected<std::vector<std::byte>, based::decode_error> data =
 If you'd rather use a byte-oriented interface, a `decoder` class exists to help with it:
 
 ```cpp
-using data_block = based::decoder<based:base64>::data_block;
+using data_block = based::decoder<based::base64>::data_block;
 std::expected<std::tuple<data_block, decode_success>, decode_error> result;
 
-based::decoder<based:base64> decoder;
-result = decoder.push();
-result = decoder.push();
-result = decoder.push();
-result = decoder.push();
+based::decoder<based::base64> decoder;
+result = decoder.push('Z');
+result = decoder.push('g');
+result = decoder.push('=');
+result = decoder.push('=');
 result = decoder.flush();
 ```
 
-Use `push` to add data a byte at a time, and `flush` when done adding data. Both functions return an optional array ofdata that was decoded by the most recent byte pushed, or a `decode_error` if the most recent byte pushed caused an error to be dtected. By default the `decoder` buffers one block (as defined by the RFC) of text, but a second template parameter to the class allows a larger buffer size as a multiple of blocks. This will change the size of the array returned by the function.
+Use `push` to add data a byte at a time, and `flush` when done adding data. Both functions return an optional array of data that was decoded by the most recent byte pushed, or a `decode_error` if the most recent byte pushed caused an error to be detected. By default the `decoder` buffers one block (as defined by the RFC) of text, but a second template parameter to the class allows a larger buffer size as a multiple of blocks. This will change the size of the array returned by the function.
 
 There exists a `decode_unchecked` function, which is used internally to be a fast implementation that performs potentially unsafe operations if certain bounds aren't checked or certain conditions are not ensured.
 
